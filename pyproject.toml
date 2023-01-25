@@ -1,3 +1,47 @@
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "krautcat-audio-toolchain"
+description = "Audio toolchain for krautcat's needs"
+readme = "README.md"
+requires-python = ">=3.7"
+license = "MIT"
+keywords = []
+authors = [
+  { name = "Georgiy Odisharia", email = "georgiy.odisharia@gmail.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+    "mutagen",
+    "psutil"
+]
+dynamic = ["version"]
+
+[project.urls]
+Documentation = "https://github.com/krautcat/audio-toolchain#readme"
+Issues = "https://github.com/krautcat/audio-toolchain/issues"
+Source = "https://github.com/krautcat/audio-toolchain"
+
+[project.scripts]
+krautcat-dirnamer = "krautcat.audio.library.fs.dirnamer:main"
+krautcat-tagger = "krautcat.audio.library.tagger:main"
+krautcat-cuesplitter = "krautcat.audio.cuesplitter:main"
+krautcat-converter = "krautcat.audio.converter:main"
+
+[tool.hatch.version]
+path = "lib/krautcat/audio/__about__.py"
+
+[tool.hatch.build]
+sources = ["lib"]
