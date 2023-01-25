@@ -433,7 +433,7 @@ class ConfigurationRenameAlbumDir:
             self.dirname_format = cli_args.format
         else:
             self.dirname_format = "{artist} — {year} — {album}"
-            self.dirname_format_fields.upwdate(["artist", "year", "album"])
+            self.dirname_format_fields.update(["artist", "year", "album"])
 
     def _validate_dirname_format(self, format_str):
         allowed_format_name = set(["artist", "year", "album"]) 
@@ -560,7 +560,7 @@ class Argparser:
     def parse(self, args):
         return self.argparser.parse_args(args[1:])
 
-    def help(self, args):
+    def help(self):
         return self.argparser.format_help()
 
 
@@ -582,15 +582,26 @@ class TuiRenameAlbumDirWorker:
         self._ui = ui
     
     def __call__(self) -> pathlib.Path:
-        widget_key = f"TextMessageWithSpinner-{self.directory}"
-        self._ui.view[widget_key] = TextMessageWithSpinner(f"Scanning {self.directory}...",
+        widget_key = self._ui.view << TextMessageWithSpinner(f"Scanning {self.directory}...",
                                                            "Scanning done")       
         worker = RenameAlbumDirWorker(self.directory, self._config)
         album_path = worker()
+        
+        if album_path == self.directory:
+            done_msg = f"Directory '{album_path}' didn't change"
+        else:
+            done_msg = f"Renamed {self.directory} to {album_path}"
+        self._ui.view[widget_key]._msg_done = done_msg
 
+        self._ui.view[widget_key].done() 
         del self._ui.view[widget_key]
 
         return album_path
+
+
+def classic_unix_ui_main(config: Configuration, ns: argparse.Namespace) -> int:
+    pass
+
 
 async def tui_main(config: Configuration, ns: argparse.Namespace) -> int: 
     worker = get_worker_by_name(ns.command, ns.ui)
@@ -603,11 +614,12 @@ async def tui_main(config: Configuration, ns: argparse.Namespace) -> int:
             for directory in Directories(config):
                 tasks.append(loop.run_in_executor(pool,
                                                   worker(directory, config, ui)))
-            loop.create_task(ui.process_messages())
-            completed, pending = await asyncio.wait(tasks)
-            await ui.stop() 
+            ui_task = loop.create_task(ui.process_messages())
+            completed, pending = await asyncio.wait([*tasks])
+    await asyncio.gather(*pending)
+    ui_task.cancel()
 
-        return 0
+    return 0
 
 
 def main():
@@ -632,5 +644,5 @@ def main():
                                                                         namespace)))
         loop.close()
         return result
-    elif namespace == "no-ui":
+    elif namespace.ui == "no-ui":
         return classic_unix_ui(config)

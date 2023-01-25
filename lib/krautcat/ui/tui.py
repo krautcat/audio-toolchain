@@ -1,4 +1,5 @@
 import asyncio
+import random
 import shutil
 import sys
 import threading
@@ -34,7 +35,11 @@ class Cursor:
         return self.current
 
 
-class TextMessageWithSpinner:
+class Widget:
+    pass
+
+
+class TextMessageWithSpinner(Widget):
     is_animatable = True
 
     def __init__(self, msg: str, done):
@@ -50,6 +55,16 @@ class TextMessageWithSpinner:
         self.current_mark = "."
 
         self.content = f"{self.current_mark} {self.msg}"
+
+    def __hash__(self) -> int:
+        hash_sum = hash(self.msg)
+
+        if self._msg_done is not None:
+            hash_sum += hash(self._msg_done) << 8
+        else:
+            hash_sum += int(random.randint(0, 2 ** 16)) << 8
+
+        return hash_sum 
 
     def __len__(self):
         return len(self.content)
@@ -119,6 +134,13 @@ class View:
         self.widgets_lock = Lock()
         self._widgets = OrderedDict()
         self.widgets_to_be_deleted = list()
+
+    def __lshift__(self, widget: Widget) -> str:
+        key = type(widget).__name__ + f"_{hash(widget)}"
+
+        self[key] = widget
+
+        return key
 
     def __setitem__(self, name, widget):
         with self.widgets_lock:
@@ -212,15 +234,16 @@ class UI:
 
         with self.view.widgets_lock:
             for w in self.view.widgets_to_be_deleted:
+                if w.animated:
+                    w.prepare_next_frame()
                 sys.stdout.write(f"{w.content}\n")
-                self.height_previous_scene += w.height
 
             for w in self.view.widgets:
-                sys.stdout.write(f"{w.content}\n")
                 self.height_previous_scene += w.height
 
                 if w.animated:
                     w.prepare_next_frame()
+                sys.stdout.write(f"{w.content}\n")
 
         self.view.clear_widgets_to_be_deleted()
 
@@ -242,10 +265,14 @@ class UI:
     async def handle_next_frame(self):
         await self.view.next_frame()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "UI":
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        return
+        for task in self._child_tasks:
+            task.cancel()
+        self.delete_scene()
+        self.draw_scene()
+        await self.stop()
 
 
