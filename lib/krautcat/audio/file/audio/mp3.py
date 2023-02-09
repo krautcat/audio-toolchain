@@ -1,94 +1,73 @@
+from typing import Optional, Union
+
 import mutagen.id3
 import mutagen.mp3
 
 from . import generic as _generic
 from ... import exceptions as _exceptions
 
-class MetadataMP3(_generic.Metadata):
-    def _track_name_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            track_name_frame = source.getall("TIT2")
-            if len(track_name_frame) > 0:
-                self._track_name = track_name_frame[0].text[0]
-            else:
-                self._track_name = None
+from krautcat.audio.file.audio.generic import TagsBackend as GenericTagsBackend
+from krautcat.audio.metadata.types import Date
+from krautcat.audio.metadata.mp3 import Metadata as MetadataMP3
 
-        elif isinstance(source, str):
-            self._track_name = source
 
-    def _artist_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            artist_frame = source.getall("TPE1")
-            if len(artist_frame) > 0:
-                self._artist = artist_frame[0].text[0]
-            else:
-                self._artist = None
+class TagsBackend(GenericTagsBackend):
+    def __init__(self, audio_file: "AudioFileMP3") -> None:
+        super().__init__(audio_file)
 
-        elif isinstance(source, str):
-            self._artist = source
+        self._mutagen_file = mutagen.mp3.MP3(audio_file.path)
 
-    def _album_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            album_frame = source.getall("TALB")
-            if len(album_frame) > 0:
-                self._album = album_frame[0].text[0]
-            else:
-                self._album = None 
+    def load_tags(self) -> MetadataMP3: 
+        mutagen_tags = self._mutagen_file.tags
+        if mutagen_tags is None:
+            self._mutagen_file.add_tags()
+            mutagen_tags = self._mutagen_file.tags
 
-        elif isinstance(source, str):
-            self._album = source
+        def _get_tag(name: str, default: Optional[str] = None) -> Union[str, None]:
+            frame = mutagen_tags.getall(name)
+            if len(frame) > 0:
+                return frame[0].text[0]
+            return default
 
-    def _date_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            date_frame = source.getall("TDRC")
-            if len(date_frame) > 0:
-                self._date = str(date_frame[0].text[0])
-            else:
-                self._date = None
+        track_number = int(_get_tag("TRCK") or 0)
+        track_name = _get_tag("TIT2")
+        artist = _get_tag("TPE1")
+        album = _get_tag("TALB")
 
-        elif isinstance(source, str):
-            self._date = source
+        date = Date(_get_tag("TDRC"))
 
-        elif isinstance(source, int):
-            self._date = str(source)
+        tracks_total = int(_get_tag("TXXX:TOTALTRACKS") or 0)
 
-    def _track_number_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            track_number_frame = source.getall("TRCK")
-            if len(track_number_frame) > 0:
-                self._track_number = str(track_number_frame[0].text[0])
-            else:
-                self._track_number = None
+        krautcat_tags = MetadataMP3(artist=artist,
+                                    track_name=track_name,
+                                    track_number=track_number,
+                                    album=album,
+                                    date=date,
+                                    tracks_total=tracks_total)
 
-        elif isinstance(source, str):
-            self._track_number = source
+        return krautcat_tags
 
-        elif isinstance(source, int):
-            self._track_number = str(source)
+    def save_tags(self, metadata: Optional[MetadataMP3] = None) -> bool:
+        mutagen_tags = self._mutagen_file.tags
 
-    def _total_tracks_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            total_tracks_frame = source.getall("TXXX:TOTALTRACKS")
-            if len(total_tracks_frame) > 0:
-                self._total_tracks = str(total_tracks_frame[0].text[0])
-            else:
-                self._total_tracks = None
+        mutagen_tags.setall("TIT2", [mutagen.id3.TIT2(encoding=3, text=metadata.track_name)])
+        mutagen_tags["TALB"] = mutagen.id3.TALB(encoding=3, text=metadata.album)
+        mutagen_tags["TPE1"] = mutagen.id3.TPE1(encoding=3, text=metadata.artist)
 
-        elif isinstance(source, str):
-            self._total_tracks = source
+        if metadata.track_number is not None:
+            mutagen_tags["TRCK"] = mutagen.id3.TRCK(encoding=3, text=str(metadata.track_number))
+       
+        if metadata.total_tracks is not None: 
+            mutagen_tags["TXXX:TOTALTRACKS"] = mutagen.id3.TXXX(
+                encoding=mutagen.id3.Encoding.UTF8,
+                desc="TOTALTRACKS",
+                text=str(metadata.total_tracks)
+            )
 
-        elif isinstance(source, int):
-            self._total_tracks = str(source)
+        if metadata.date is not None:
+            mutagen_tags["TDRC"] = mutagen.id3.TDRC(encoding=3, text=str(metadata.date))
 
-    def update(self, other_metadata):
-        self._track_name = other_metadata._track_name
-        self._track_number = other_metadata._track_number
-
-        self._artist = other_metadata._artist
-        self._album = other_metadata._album
-        self._date = other_metadata._date
-
-        self._total_tracks = other_metadata._total_tracks
+        self._mutagen_file.save()
 
 
 class AudioFileMP3(_generic.AudioFile):
@@ -98,45 +77,22 @@ class AudioFileMP3(_generic.AudioFile):
     def __init__(self, path, *, open=True):
         super().__init__(path, open=open)
 
-        self.metadata = MetadataMP3(tags=self._tags)
+        self._tags_backend = TagsBackend(self)
 
-    @property
-    def file(self):
-        return self._raw_file
+        if open:
+            self.metadata = self._tags_backend.load_tags()
+        else:
+            self.metadata = None
 
-    def _open_file(self, file_path):
-        try:
-            return mutagen.mp3.MP3(file_path)
-        except mutagen.mp3.HeaderNotFoundError:
-            return None
+    def load_tags(self) -> None:
+        self.metadata = self._tags_backend.load_tags()
 
     def save_tags(self):
-        if self._tags is None:
-            if self._mutagen_file is None:
-                self._mutagen_file, _ = self._open_file(self._path)
-            if self._mutagen_file is None:
-                raise _exceptions.MutagenOpenFileError(self._path)          
-            self._mutagen_file.add_tags()
-            self._tags = self._mutagen_file.tags
+        if self.metadata is not None:
+            self._tags_backend.save_tags(self.metadata)
+        else:
+            raise ValueError()
 
-        self._tags.setall("TIT2", [mutagen.id3.TIT2(encoding=3, text=self.metadata.track_name)])
-        self._tags["TALB"] = mutagen.id3.TALB(encoding=3, text=self.metadata.album)
-        self._tags["TPE1"] = mutagen.id3.TPE1(encoding=3, text=self.metadata.artist)
-
-        if self.metadata.track_number is not None:
-            self._tags["TRCK"] = mutagen.id3.TRCK(encoding=3, text=str(self.metadata.track_number))
-       
-        if self.metadata.total_tracks is not None: 
-            self._tags["TXXX:TOTALTRACKS"] = mutagen.id3.TXXX(
-                encoding=mutagen.id3.Encoding.UTF8,
-                desc="TOTALTRACKS",
-                text=str(self.metadata.total_tracks)
-            )
-
-        if self.metadata.date is not None:
-            self._tags["TDRC"] = mutagen.id3.TDRC(encoding=3, text=self.metadata.date)
-
-        self._mutagen_file.save()
 
 
 class MP3Encoder:
