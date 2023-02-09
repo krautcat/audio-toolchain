@@ -1,97 +1,91 @@
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst
+from typing import Optional, Type, Union
 
+import mutagen
 import mutagen.flac
 
 from . import generic as _generic
+from krautcat.audio.metadata.flac import Metadata as MetadataFLAC
+from krautcat.audio.metadata.types import Date
+from krautcat.audio.file.audio.generic import TagsBackend as GenericTagsBackend
+from krautcat.gstreamer import ElementFLACDecoder, ElementFLACEncoder, ElementFLACParser
 
 
-class MetadataFLAC(_generic.Metadata):
-    def _track_name_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            track_name = source.get("TITLE", None)
-            if track_name is not None:
-                self._track_name = track_name[0]
+class TagsBackend(GenericTagsBackend):
+    def __init__(self, audio_file: "AudioFileFLAC") -> None:
+        super().__init__(audio_file)
 
-        elif isinstance(source, str):
-            self._track_name = source
+        self._mutagen_file = mutagen.flac.FLAC(audio_file.path)
+        
+    def load_tags(self) -> MetadataFLAC:
+        mutagen_tags = self._mutagen_file.tags    
+        def _get_tag(name: str, default: Optional[str] = None) -> Union[str, None]:
+            tag_values = mutagen_tags.get(name, default)
+            if tag_values is not None:
+                return tag_values[0] 
 
-    def _track_number_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            track_name = source.get("TRACKNUMBER", None)
-            if track_name is not None:
-                self._track_number = track_name[0]
+        track_name = _get_tag("title")
+        track_number = int(_get_tag("tracknumber") or 0)
+        artist = _get_tag("artist")
+        album = _get_tag("album")       
+      
+        date = Date(_get_tag("date", None))
 
-        elif isinstance(source, str):
-            self._track_number = source
+        tracks_total = int(_get_tag("tracktotal") or 0)
 
-    def _artist_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            artist = source.get("artist", None)
-            if artist is not None:
-                self._artist = artist[0]
+        krautcat_tags = MetadataFLAC(artist=artist,
+                                                track_name=track_name,
+                                                track_number=track_number,
+                                                album=album,
+                                                date=date)
+        return krautcat_tags
+        
+    def save_tags(self, metadata: MetadataFLAC) -> bool:
+        self._mutagen_file.tags["TITLE"] = metadata.track_name
+        self._mutaen_file.tags["ALBUM"] = metadata.album
+        self._mutaen_file.tags["ARTIST"] = metadata.artist
 
-        elif isinstance(source, str):
-            self._artist = source
+        if metadata.track_number is not None:
+            self._mutaen_file.tags["TRACKNUMBER"] = str(metadata.track_number)
+        if metadata.total_tracks is not None: 
+            self._mutaen_file.tags["TRACKTOTAL"] = str(metadata.total_tracks)
 
-    def _album_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            album = source.get("album", None)
-            if album is not None:
-                self._album = album[0]
-
-        elif isinstance(source, str):
-            self._album = source
-
-    def _date_setter_impl(self, source):
-        if isinstance(source, mutagen.Tags):
-            self._date = date = source.get("date", None)
-            if isinstance(date, list):
-                date_new = date[0]
-                for d in date:
-                    try:
-                        int(d)
-                        date_new = d
-                        break
-                    except ValueError:
-                        continue
-
-                self._date = date_new
-
-        elif isinstance(source, str):
-            self._date = source
-
-        elif isinstance(source, int):
-            self._date = str(source)
-
-
-class AudioFileFLAC(_generic.AudioFile):
-    def __init__(self, path, open=True):
-        super().__init__(path, open=open)
-        self.extension = "flac"
-
-        self.metadata = MetadataFLAC(tags=self._tags)
-
-    def _open_file(self, file_path):
-        return mutagen.flac.FLAC(file_path)
-
-    def save_tags(self):
-        self._tags["TITLE"] = self.metadata.track_name
-        self._tags["ALBUM"] = self.metadata.album
-        self._tags["ARTIST"] = self.metadata.artist
-
-        if self.metadata.track_number is not None:
-            self._tags["TRACKNUMBER"] = str(self.metadata.track_number)
-        if self.metadata.total_tracks is not None: 
-            self._tags["TRACKTOTAL"] = str(self.metadata.total_tracks)
-
-        if self.metadata.date is not None:
-            self._tags["DATE"] = self.metadata.date
+        if metadata.date is not None:
+            self._mutaen_file.tags["DATE"] = metadata.date
 
         self._mutagen_file.save()
 
-    @property
-    def gst_decoder(self):
-        return Gst.ElementFactory.make("flacdec", None)
 
+class AudioFileFLAC(_generic.AudioFile):
+    EXTENSION = "flac"
+    
+    def __init__(self, path, open=True):
+        super().__init__(path)
+
+        self._tags_backend = TagsBackend(self)
+ 
+        if open: 
+            self.metadata = self._tags_backend.load_tags()
+        else:
+            self.metadata = None
+
+    def load_tags(self) -> None:
+        self.metadata = self._tags_backend.load_tags()
+        print(self.metadata)
+
+    def save_tags(self):
+        if self.metadata is not None:
+            self._tags_backend.save_tags(self.metadata)
+        else:
+            raise ValueError()
+
+    @property
+    def gst_parser(self) -> Type[ElementFLACParser]:
+        return ElementFLACParser
+
+    @property
+    def gst_decoder(self) -> Type[ElementFLACDecoder]:
+        return ElementFLACDecoder
+
+    @property
+    def gst_encoder(self) -> Type[ElementFLACEncoder]:
+        return ElementFLACEncoder

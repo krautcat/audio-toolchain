@@ -44,4 +44,17 @@ krautcat-converter = "krautcat.audio.converter:main"
 path = "lib/krautcat/audio/__about__.py"
 
 [tool.hatch.build]
-sources = ["lib"]
+sources = [
+    "lib"
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "lib/*",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "lib/krautcat",
+]
+
