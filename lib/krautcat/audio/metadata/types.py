@@ -1,5 +1,7 @@
 from typing import Optional, Union
 
+from mutagen.id3 import ID3TimeStamp
+
 
 class Date:
     def __init__(self, date_string: Optional[Union[str, "Date"]] = None) -> None:
@@ -7,7 +9,7 @@ class Date:
         self.month = 0       
         self.day = 0       
  
-        if date_string is None:
+        if date_string is None or date_string == "":
             return
  
         if type(date_string) is Date:
@@ -15,9 +17,22 @@ class Date:
             self.month = date_string.month
             self.day = date_string.day
             return    
-
-        date_parts = date_string.split("-")
         
+        if isinstance(date_string, int):
+            self.year = date_string
+            return
+
+        if isinstance(date_string, ID3TimeStamp):
+            date_string = str(date_string)
+
+        date_parts = list()
+        if "-" in date_string: 
+            date_parts = date_string.split("-")
+        elif " " in date_string:
+            date_parts = date_string.split(" ")
+        else:
+            date_parts.append(date_string)
+
         self.year = int(date_parts[0])
 
         if len(date_parts) == 3:

@@ -9,7 +9,7 @@ class FilesystemGeneric:
     @staticmethod
     def escape_filename(filename):
         replacements = [
-                (re.compile(r"[//:]"), r"_"),
+            (re.compile(r"[/:]"), r"_"),
             (re.compile(r"[\?]"), r"!"),
         ]
 

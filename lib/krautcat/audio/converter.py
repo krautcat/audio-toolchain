@@ -184,8 +184,6 @@ def main():
 
     cli_args = argparser.parse(sys.argv[1:])
 
-    Gst.debug_set_active(True)
-    Gst.debug_set_default_threshold(3)
     GObject.threads_init()
     asyncio.set_event_loop_policy(asyncio_glib.GLibEventLoopPolicy())
     

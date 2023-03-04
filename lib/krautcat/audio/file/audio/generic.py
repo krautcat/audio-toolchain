@@ -27,8 +27,7 @@ class TagsBackend:
 
 
 class AudioFile:
-    def __init__(self, path: Union[pathlib.Path, str], *,
-                 open=True):
+    def __init__(self, path: Union[pathlib.Path, str]):
         self._path = pathlib.Path(path)
 
         self._tags_backend = None
@@ -47,12 +46,3 @@ class AudioFile:
         else:
             raise FileNotExistsError(self._path)
 
-    def open(self):
-        if self._path is not None:
-            return self._open_file(str(self._path))
-        else:
-            raise FileNotExistsError(self._path)
-
-    @abstractmethod
-    def _open_file(self, path):
-        ...

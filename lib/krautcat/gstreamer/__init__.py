@@ -6,6 +6,7 @@ from typing import Optional, Union
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GObject, GLib
+Gst.init(None)
 
 
 class _GstreamerEnumExposer(type):

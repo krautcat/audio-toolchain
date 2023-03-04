@@ -67,12 +67,12 @@ class TagStatistics:
     @property
     def artist(self):
         if len(self._artist) == 0:
-            return None
+            return None, None
         elif len(self._artist) == 1:
             for artist, _ in self._artist.items():
-                return artist
+                return artist, None
         elif len(self._artist) > 1:
-            return "VA"
+            return "Various Artists", ", ".join(self._artist.keys())
 
     @property
     def album(self):
@@ -128,153 +128,6 @@ class StdinHandlerJson(StdinHandler):
         return obj["directory"]
 
 
-class _DirectoryQueueIterator(Iterator):
-    def __init__(self, queue):
-        self._queue = queue
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        directory = self._queue.pop()
-
-        if directory is None:
-            raise StopIteration
-
-        return directory
-
-
-class DirectoryQueue(Iterable):
-    def __init__(self):
-        self._queue = list()
-
-        self._done = False
-
-        self._rlock_queue = threading.RLock()
-        self._cv_queue = threading.Condition(self._rlock_queue)
-
-        self._rlock_done = threading.RLock()
-
-    def __iter__(self):
-        return _DirectoryQueueIterator(self)
-
-    def push(self, directory):
-        with self._rlock_queue:
-            self._queue.append(directory)
-            self._cv_queue.notify()
-
-    def pop(self):
-        with self._rlock_queue:
-            if self.empty():
-                if self.done is False:
-                    self._cv_queue.wait()
-                else:
-                    return None
-            return self._queue.pop()
-    
-    def empty(self):
-        with self._rlock_queue:
-            if len(self._queue) == 0:
-                return True
-            else:
-                return False
-
-    @property
-    def done(self):
-        with self._rlock_done:
-            return self._done
-
-    @done.setter
-    def done(self, value):
-        with self._rlock_done:
-            self._done = value
-
-
-class DirectoryPushWorker(threading.Thread):
-    def __init__(self, queue, config, *thread_args, **thread_kwargs):
-        self.directory_queue = queue
-
-        self.config = config
-
-        if config.command_config.stdin is not StdinType.NONE:
-            handler_klass_name = f"StdinHandler{config.command_config.stdin.value.capitalize()}"
-            handler_klass = getattr(sys.modules[__name__], handler_klass_name, None)
-
-            if handler_klass is not None:
-                self._consume_directories = self._stdin_handler
-                self._stdin_handler_obj = handler_klass()
-        else:
-            if config.command_config.library_root:
-                self._consume_directories = self._library_root_handler
-            else:
-                self._consume_directories = self._directories_list_handler
-
-        super().__init__(*thread_args, **thread_kwargs)
-
-    def run(self):
-        return self._consume_directories()
-
-    def _consume_directories(self):
-        pass
-
-    def _stdin_handler(self):
-        directory = self._stdin_handler_obj.readline()
-        while directory is not None: 
-            self.directory_queue.push(Path(directory))
-            directory = self._stdin_handler_obj.readline()
-
-        self.directory_queue.done = True
-
-    def _library_root_handler(self):
-        library_root = self.config.command_config.directories[0]
-        
-        for entry in library_root.iterdir():
-            if entry.is_dir():
-                self.directory_queue.push(entry)
-        
-        self.directory_queue.done = True
-
-    def _directories_list_handler(self):
-        for directory in self.config.command_config.directories:
-            self.directory_queue.push(directory)
-
-        self.directory_queue.done = True
-
-
-class _DirectoriesIterator:
-    def __init__(self, dirs):
-        self.directories = dirs
-
-        self._len = len(self.directories._directories)
-        self._cursor = 0
-
-    def __iter__(self):
-        return self
-        
-    def __next__(self):
-        if self._cursor < self._len:
-            value = self.directories._directories[self._cursor]
-            self._cursor += 1
-            return value
-        else:
-            raise StopIteration
-
-
-class Directories:
-    def __init__(self, config):
-        if config.command_config.library_root:
-            self._directories = [
-                e
-                for e in config.command_config.directories[0].iterdir()
-                if e.is_dir()
-            ]
-        else:
-            self._directories = config.command_config.directories
-
-    def __iter__(self):
-        return _DirectoriesIterator(self)
-
-
 class RenameAlbumDirWorker:
     def __init__(self, album_path, config):
         self.command_config = config.command_config
@@ -292,7 +145,7 @@ class RenameAlbumDirWorker:
         if not directory.is_dir():
             return 
 
-        name = self._get_name_from_dir_content(directory, directory_filesystem)
+        name, files = self._get_name_from_dir_content(directory, directory_filesystem)
         old_name = directory.name
         target_name = name
 
@@ -305,18 +158,22 @@ class RenameAlbumDirWorker:
                     new_directory_name.mkdir(parents=True, exist_ok=True)
                     for entry in directory.iterdir():
                         entry_name = entry.name
-                        shutil.move(directory / entry_name, new_directory_name / entry_name) 
+                        if entry_name in files:
+                            entry_name_new = files[entry_name]
+                        else:
+                            entry_name_new = entry_name
+                        shutil.move(directory / entry_name, new_directory_name / entry_name_new) 
                     renamed = True
                     if target_name != old_name:
                         shutil.rmtree(old_name)
                 except OSError as e:
-                    target_name = f"{name} ({count})"
-                    count += 1
-
+                    print(e, file=sys.stderr)
 
     def _get_name_from_dir_content(self, album_dir: Path,
                                    directory_filesystem: krautcat.audio.fs.FilesystemGeneric):
         stats = TagStatistics() 
+
+        music_file_entries = dict()
 
         audio_files = 0
         for entry in album_dir.iterdir():
@@ -336,31 +193,68 @@ class RenameAlbumDirWorker:
             except MutagenOpenFileError:
                 continue
 
-            audio_files += 1 
+            if file.metadata is None:
+                continue
+            
+            audio_files += 1
             stats.update(file.metadata)
 
-        if audio_files == 0:
-            return None
+            filename_format = self.command_config.filename_format
+            filename_format = re.sub(r"\[(.*?\{disc_number\}.*?)\]",
+                                     r"\g<1>" if file.metadata.disc_number is not None else r"",
+                                     filename_format)
+            filename_format_kwargs = {
+                "track_number": file.metadata.track_number,
+            }
+            if file.metadata.track_name is not None:
+                filename_format_kwargs["track_name"] = directory_filesystem.escape_filename(file.metadata.track_name)
+            else:
+                filename_format_kwargs["track_name"] = ""
+            if file.metadata.disc_number is not None:
+                filename_format_kwargs["disc_number"] = file.metadata.disc_number
+            music_file_entries[entry.name] = filename_format.format(
+                    **filename_format_kwargs
+                ) + f".{file.EXTENSION}"
 
-        artist = stats.artist
+        if audio_files == 0:
+            return None, None
+
+        artist, full_artist = stats.artist
         album = stats.album
         date = stats.date
+
+        dirname_format = self.command_config.dirname_format
 
         format_kwargs = {}
         if "artist" in self.command_config.dirname_format_fields:
             if artist is None:
                 artist = "None"
             format_kwargs["artist"] = directory_filesystem.escape_filename(artist)
+            
+            if full_artist is not None:
+                if "{full_artist}" in dirname_format:
+                    dirname_format = re.sub(r"\[(.*?\{full_artist\}.*?)\]",
+                                            r"\g<1>",
+                                            dirname_format)
+                    format_kwargs["full_artist"] = directory_filesystem.escape_filename(full_artist)
+            else:
+                if "full_artist" in dirname_format:
+                    dirname_format = re.sub(r"\[(.*?\{full_artist\}.*?)\]",
+                                            r"",
+                                            dirname_format)
+
         if "album" in self.command_config.dirname_format_fields:
             if album is None:
                 album = "None"
             format_kwargs["album"] = directory_filesystem.escape_filename(album)
+    
         if "year" in self.command_config.dirname_format_fields:
             if date is None:
                 date = None
             format_kwargs["year"] = date
 
-        return self.command_config.dirname_format.format(**format_kwargs)
+        print(music_file_entries, file=sys.stderr)
+        return dirname_format.format(**format_kwargs), music_file_entries
 
 
 class RenameFilesWorker:
@@ -375,15 +269,19 @@ class RenameFilesWorker:
 
     def _rename_files(self, album_path):
         directory_filesystem = krautcat.audio.fs.get_fs_class(album_path)
+        filename_format = self.command_config.dirname_format
 
         if not album_path.is_dir():
             return 
 
         for entry in album_path.iterdir():
+            if entry.is_dir():
+                self._rename_files(entry)
+
             if not entry.is_file() or entry.stat().st_size == 0:
                 print("Not a file")
                 continue
-            
+
             file_kls = file_class(entry)
 
             if file_kls is None:
@@ -393,23 +291,33 @@ class RenameFilesWorker:
             file = file_kls(entry)
 
             format_kwargs = {}
+            
+            filename_format = re.sub(r"\[(.*?\{disc_number\}.*?)\]",
+                                     r"\1" if file.metadata.disc_number is not None else r"",
+                                     filename_format)
+            print(f"{filename_format}", file=sys.stderr)
+            
             if "artist" in self.command_config.dirname_format_fields:
                 format_kwargs["artist"] = file.metadata.artist
             if "album" in self.command_config.dirname_format_fields:
                 format_kwargs["album"] = file.metadata.album
             if "year" in self.command_config.dirname_format_fields:
                 format_kwargs["year"] = file.metadata.date
+
+            if ("disc_number" in filename_format
+                    and "disc_number" in self.command_config.dirname_format_fields):
+                format_kwargs["disc_number"] = file.metadata.disc_number
+                print(f"Filename format: {filename_format}", file=sys.stderr)
+
             if "track_number" in self.command_config.dirname_format_fields:
                 if file.metadata.track_number is not None:
-                    format_kwargs["track_number"] = file.metadata.track_number.split("/")[0]
+                    format_kwargs["track_number"] = file.metadata.track_number
                 else:
                     format_kwargs["track_number"] = ""
             if "track_name" in self.command_config.dirname_format_fields:
                 format_kwargs["track_name"] = file.metadata.track_name
 
-            print(file.extension)
-            new_name = self.command_config.dirname_format.format(**format_kwargs) + "." + file.extension
-
+            new_name = filename_format.format(**format_kwargs) + "." + file.EXTENSION
             name = directory_filesystem.escape_filename(new_name)
 
             if name == entry.name:
@@ -417,6 +325,7 @@ class RenameFilesWorker:
             else:
                 print(f"Renamed {entry} to {name}")
 
+            print(f"{entry} to {entry.parent / name}", file=sys.stderr)
             entry.rename(entry.parent / name)
 
 
@@ -435,8 +344,10 @@ class ConfigurationRenameAlbumDir:
             self.dirname_format = "{artist} — {year} — {album}"
             self.dirname_format_fields.update(["artist", "year", "album"])
 
+        self.filename_format = "[{disc_number}. ]{track_number:0>02}. {track_name}"
+
     def _validate_dirname_format(self, format_str):
-        allowed_format_name = set(["artist", "year", "album"]) 
+        allowed_format_name = set(["artist", "full_artist", "year", "album"]) 
     
         fmtter = string.Formatter()
         for _, field_name, _, _ in fmtter.parse(format_str):
@@ -465,13 +376,13 @@ class ConfigurationRenameFiles:
         if cli_args.format is not None and self._validate_dirname_format(cli_args.format):
             self.dirname_format = cli_args.format
         else:
-            self.dirname_format = "{track_number}. {track_name}"
-            self.dirname_format_fields.update(["track_number", "track_name"])
+            self.dirname_format = "[{disc_number}. ]{track_number:0>02}. {track_name}"
+            self.dirname_format_fields.update(["disc_number", "track_number", "track_name"])
 
     def _validate_dirname_format(self, format_str):
         allowed_format_name = set(["artist", "year", "album", "track_number", "track_name"]) 
         
-        for literal_text, field_name, format_spec, conversion in string.Formatter.parse(format_str):
+        for _, field_name, _, _ in string.Formatter.parse(format_str):
             if field_name in allowed_format_name:
                 self.dirname_format_fields.add(field_name)
             else:
@@ -599,6 +510,28 @@ class TuiRenameAlbumDirWorker:
         return album_path
 
 
+class TuiRenameFilesWorker:
+    def __init__(self, directory: pathlib.Path,
+                 config: Configuration, ui: TUI) -> None:
+        self.directory = directory
+        self._config = config
+        self._ui = ui
+    
+    def __call__(self) -> pathlib.Path:
+        widget_key = self._ui.view << TextMessageWithSpinner(f"Scanning {self.directory}...",
+                                                           "Scanning done")       
+        worker = RenameFilesWorker(self.directory, self._config)
+        album_path = worker()
+       
+        done_msg = f"Renamed files in {album_path}" 
+        self._ui.view[widget_key]._msg_done = done_msg
+
+        self._ui.view[widget_key].done() 
+        del self._ui.view[widget_key]
+
+        return album_path
+
+
 def classic_unix_ui_main(config: Configuration, ns: argparse.Namespace) -> int:
     pass
 
@@ -607,14 +540,22 @@ async def tui_main(config: Configuration, ns: argparse.Namespace) -> int:
     worker = get_worker_by_name(ns.command, ns.ui)
     loop = asyncio.get_event_loop()
 
+    if config.command_config.library_root:
+        directories = [
+            e
+            for e in config.command_config.directories[0].iterdir()
+            if e.is_dir()
+        ]
+    else:
+        directories = config.command_config.directories
     tasks = list()
 
     async with TUI() as ui:
+        ui_task = loop.create_task(ui.process_messages())
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-            for directory in Directories(config):
+            for directory in directories:
                 tasks.append(loop.run_in_executor(pool,
                                                   worker(directory, config, ui)))
-            ui_task = loop.create_task(ui.process_messages())
             completed, pending = await asyncio.wait([*tasks])
     await asyncio.gather(*pending)
     ui_task.cancel()

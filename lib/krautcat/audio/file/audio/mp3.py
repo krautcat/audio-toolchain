@@ -7,8 +7,8 @@ from . import generic as _generic
 from ... import exceptions as _exceptions
 
 from krautcat.audio.file.audio.generic import TagsBackend as GenericTagsBackend
+from krautcat.audio.metadata import Metadata
 from krautcat.audio.metadata.types import Date
-from krautcat.audio.metadata.mp3 import Metadata as MetadataMP3
 
 
 class TagsBackend(GenericTagsBackend):
@@ -17,7 +17,7 @@ class TagsBackend(GenericTagsBackend):
 
         self._mutagen_file = mutagen.mp3.MP3(audio_file.path)
 
-    def load_tags(self) -> MetadataMP3: 
+    def load_tags(self) -> Metadata: 
         mutagen_tags = self._mutagen_file.tags
         if mutagen_tags is None:
             self._mutagen_file.add_tags()
@@ -29,25 +29,42 @@ class TagsBackend(GenericTagsBackend):
                 return frame[0].text[0]
             return default
 
-        track_number = int(_get_tag("TRCK") or 0)
+        track_number_field = _get_tag("TRCK") or 0
+        total_tracks_field = 0
+        if (isinstance(track_number_field, str) 
+                and ("/" in track_number_field
+                        or " " in track_number_field)):
+            sep = ""
+            if "/" in track_number_field:
+                sep = "/"
+            elif " " in track_number_field:
+                sep = " "
+            track_tag = track_number_field.split(sep)
+            track_number_field = track_tag[0]
+            total_tracks_field = track_tag[1]
+        track_number = int(track_number_field)
+        tracks_total = int(_get_tag("TXXX:TOTALTRACKS") or total_tracks_field or 0)
+        
         track_name = _get_tag("TIT2")
         artist = _get_tag("TPE1")
         album = _get_tag("TALB")
 
-        date = Date(_get_tag("TDRC"))
+        date = Date(_get_tag("TDRC", None))
 
-        tracks_total = int(_get_tag("TXXX:TOTALTRACKS") or 0)
+        disc_number = int(_get_tag("TXXX:DISCNUMBER", 0)) or None
+        discs_total = int(_get_tag("TXXX:TOTALDISCS", 0)) or None
 
-        krautcat_tags = MetadataMP3(artist=artist,
-                                    track_name=track_name,
-                                    track_number=track_number,
-                                    album=album,
-                                    date=date,
-                                    tracks_total=tracks_total)
-
+        krautcat_tags = Metadata(artist=artist,
+                                 track_name=track_name,
+                                 track_number=track_number,
+                                 album=album,
+                                 date=date,
+                                 tracks_total=tracks_total,
+                                 disc_number=disc_number,
+                                 discs_total=discs_total)
         return krautcat_tags
 
-    def save_tags(self, metadata: Optional[MetadataMP3] = None) -> bool:
+    def save_tags(self, metadata: Optional[Metadata] = None) -> bool:
         mutagen_tags = self._mutagen_file.tags
 
         mutagen_tags.setall("TIT2", [mutagen.id3.TIT2(encoding=3, text=metadata.track_name)])
@@ -67,6 +84,20 @@ class TagsBackend(GenericTagsBackend):
         if metadata.date is not None:
             mutagen_tags["TDRC"] = mutagen.id3.TDRC(encoding=3, text=str(metadata.date))
 
+        if metadata.disc_number is not None:
+            mutagen_tags["TXXX:DISCNUMBER"] = mutagen.id3.TXXX(
+                encoding=mutagen.id3.Encoding.UTF8,
+                desc="DISCNUMBER",
+                text=str(metadata.disc_number)
+            )
+
+        if metadata.total_discs is not None:
+            mutagen_tags["TXXX:TOTALDISCS"] = mutagen.id3.TXXX(
+                encoding=mutagen.id3.Encoding.UTF8,
+                desc="TOTALDISCS",
+                text=str(metadata.total_discs)
+            )
+
         self._mutagen_file.save()
 
 
@@ -75,7 +106,7 @@ class AudioFileMP3(_generic.AudioFile):
     SUFFIX = EXTENSION 
         
     def __init__(self, path, *, open=True):
-        super().__init__(path, open=open)
+        super().__init__(path)
 
         self._tags_backend = TagsBackend(self)
 

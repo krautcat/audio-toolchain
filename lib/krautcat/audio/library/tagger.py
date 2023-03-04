@@ -1,9 +1,10 @@
 import argparse
+import asyncio
 import concurrent
+import concurrent.futures
 import json
 import pathlib
 import sys
-import threading
 
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -89,107 +90,7 @@ class StdoutNone(StdoutHandler):
         pass
 
 
-class _DirectoryQueueIterator(Iterator):
-    def __init__(self, queue):
-        self._queue = queue
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        directory = self._queue.pop()
-
-        if directory is None:
-            raise StopIteration
-
-        return directory
-
-
-class DirectoryQueue(Iterable):
-    def __init__(self):
-        self._queue = list()
-
-        self._done = False
-
-        self._rlock_queue = threading.RLock()
-        self._cv_queue = threading.Condition(self._rlock_queue)
-
-        self._rlock_done = threading.RLock()
-
-    def __iter__(self):
-        return _DirectoryQueueIterator(self)
-
-    def __len__(self):
-        return len(self._queue)
-
-    def push(self, directory):
-        with self._rlock_queue:
-            self._queue.append(directory)
-            self._cv_queue.notify()
-
-    def pop(self):
-        with self._rlock_queue:
-            if self.empty():
-                if self.done is False:
-                    self._cv_queue.wait()
-                else:
-                    return None
-            return self._queue.pop()
-    
-    def empty(self):
-        with self._rlock_queue:
-            if len(self._queue) == 0:
-                return True
-            else:
-                return False
-
-    @property
-    def done(self):
-        with self._rlock_done:
-            return self._done
-
-    @done.setter
-    def done(self, value):
-        with self._rlock_done:
-            self._done = value
-
-
-class DirectoryPushWorker(threading.Thread):
-    def __init__(self, queue, config, *thread_args, **thread_kwargs):
-        self.directory_queue = queue
-
-        self.config = config
-
-        if config.command_config.library_root:
-            self._consume_directories = self._library_root_handler
-        else:
-            self._consume_directories = self._directories_list_handler
-
-        super().__init__(*thread_args, **thread_kwargs)
-
-    def run(self):
-        return self._consume_directories()
-
-    def _consume_directories(self):
-        pass
-
-    def _library_root_handler(self):
-        library_root = self.config.command_config.directories[0]
-        
-        for entry in library_root.iterdir():
-            if entry.is_dir():
-                self.directory_queue.push(entry)
-        
-        self.directory_queue.done = True
-
-    def _directories_list_handler(self):
-        for directory in self.config.command_config.directories:
-            self.directory_queue.push(directory)
-
-        self.directory_queue.done = True
-
-
-class CommandBase:
+class CapitalizeTagsWorker:
     def __init__(self, config):
         self._stdout_handler = self._init_stdout_handler(config.stdout)
 
@@ -202,46 +103,45 @@ class CommandBase:
         else:
             return None
 
-    def __call__(self, dir_queue, config):
-        for album_path in dir_queue:
-            for entry in album_path.iterdir():
-                if not entry.is_file() or entry.stat().st_size == 0:
-                    continue
-               
-                file_klass = file_class(entry)
+    def __call__(self, album_path):
+        for entry in album_path.iterdir():
+            if entry.is_dir():
+                self(entry)
 
-                if file_klass is not None and hasattr(file_klass, "save_tags"):
-                    file = file_klass(entry)
-                    file.metadata.track_name = file._tags
+            if not entry.is_file() or entry.stat().st_size == 0:
+                continue
+           
+            file_klass = file_class(entry)
 
-                    self._command_action(file)
+            if file_klass is not None and hasattr(file_klass, "save_tags"):
+                file = file_klass(entry)
+            else:
+                continue
 
-                    file.save_tags()
-                else:
-                    continue
+            artist = file.metadata.artist
+            file.metadata.artist = " ".join([w.capitalize() for w in artist.split(" ")])
             
-            self._print_stdout(album_path)
+            track_name = file.metadata.track_name
+            file.metadata.track_name = " ".join([w.capitalize() for w in track_name.split(" ")])
+
+            self._print_stdout(f"Saving tags for '{entry}' file")
+            file.save_tags()
+        
+        self._print_stdout(album_path)
 
     def _print_stdout(self, album_path):
         self._stdout_handler.print(album_path)
 
 
-class CommandCapitalizeTags(CommandBase):
-    def _command_action(self, file):
-        artist = file.metadata.artist
-        file.metadata.artist = " ".join([w.capitalize() for w in artist.split(" ")])
-        
-        track_name = file.metadata.track_name
-        file.metadata.track_name = " ".join([w.capitalize() for w in track_name.split(" ")])
-
-
 class DateToYearWorker:
-    def __init__(self, album_path, config):
-        self.album_path = album_path
+    def __init__(self, config):
         self.config = config
 
-    def __call__(self):
-        for entry in self.album_path.iterdir():
+    def __call__(self, album_path):
+        for entry in album_path.iterdir():
+            if entry.is_dir():
+                self(entry)
+
             if not entry.is_file() or entry.stat().st_size == 0:
                 continue
             
@@ -249,28 +149,29 @@ class DateToYearWorker:
 
             if file_klass is not None and hasattr(file_klass, "save_tags"):
                 file = file_klass(entry)
-                file.metadata.track_name = file._tags
-
+                
                 date = file.metadata.date
-                file.metadata.date = date.split("-")[0]
+                file.metadata.date = date.year
                 print(date)
 
                 file.save_tags()
             else:
                 continue
         
-        self._print_stdout(album_path)
+        print(album_path, file=sys.stderr)
 
 
 class CanonicalizeArtistNameWorker:
-    def __init__(self, album_path, config):
-        self.album_path = album_path
+    def __init__(self, config):
         self.config = config
 
-    def __call__(self):
+    def __call__(self, album_path):
         music_files = list()
 
-        for entry in self.album_path.iterdir():
+        for entry in album_path.iterdir():
+            if entry.is_dir():
+                self(entry)
+
             if not entry.is_file() or entry.stat().st_size == 0:
                 continue
             
@@ -300,10 +201,6 @@ class CanonicalizeArtistNameWorker:
                 file.metadata.artist = artist
                 file.save_tags()
 
-
-class Command(CommandBase):
-    def __call__(self, worker_class, dir_queue, config):
-        pass
 
 class ConfigurationCapitalizeTags:
     def __init__(self, cli_args, config_file=None):
@@ -363,6 +260,8 @@ class Argparser:
         subparsers = argparser.add_subparsers(title="Commands", dest="command")
 
         capitalize_parser = subparsers.add_parser("capitalize-tags")
+        capitalize_parser.add_argument("--library-root", action="store_true",
+                                       help="Supply root as library root")
         capitalize_parser.add_argument("album-root", action="store",
                                        type=pathlib.Path,
                                        nargs="+",
@@ -371,7 +270,7 @@ class Argparser:
         date_to_year_parser = subparsers.add_parser("date-to-year")
         date_to_year_parser.add_argument("--library-root", action="store_true",
                                          help="Supply root as library root")
-        date_to_year_parser.add_argument("ditrectory", action="store",
+        date_to_year_parser.add_argument("directory", action="store",
                                          type=pathlib.Path,
                                          nargs="+",
                                          help="Path to album")
@@ -404,7 +303,38 @@ def get_worker_by_name(command_name):
     return getattr(sys.modules[__name__], command_class_name, None)
 
 
-def main():
+async def async_main(config: Configuration,
+                     cli_args: argparse.Namespace) -> int:
+    if config.command_config.library_root:
+        directories = [
+            e
+            for e in config.command_config.directories[0].iterdir()
+            if e.is_dir()
+        ]
+    else:
+        directories = config.command_config.directories
+
+
+    worker = get_worker_by_name(cli_args.command)
+
+    if worker is None:
+        raise ValueError(f"Unknown command '{cli_args.command}'")
+
+    loop = asyncio.get_event_loop()
+    tasks = list()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        for directory in directories:
+            tasks.append(loop.run_in_executor(pool,
+                                              worker(config),
+                                              directory))
+        completed, pending = await asyncio.wait([*tasks])
+    await asyncio.gather(*pending)
+    loop.close()
+
+    return 0
+
+
+def main() -> int:
     args = sys.argv
     argparser = Argparser()
     cli_args = argparser.parse(args)
@@ -419,20 +349,8 @@ def main():
         print(argparser.help())
         exit(1)
 
-    dir_queue = DirectoryQueue()
-
-    directory_push_worker = DirectoryPushWorker(dir_queue, config)
-    directory_push_worker.start()
-
-    worker_class = get_worker_by_name(cli_args.command)
-
-    pool = ThreadPoolExecutor(max_workers=10)
-
-    future_to_album_path = {
-        pool.submit(worker_class(album_path, config)): album_path 
-        for album_path in dir_queue
-    }
-
-    concurrent.futures.as_completed(future_to_album_path)
-
-    directory_push_worker.join()
+    loop = asyncio.get_event_loop()
+    result = loop.run_until_complete(asyncio.ensure_future(async_main(config, cli_args)))
+    loop.close()
+    
+    return result
